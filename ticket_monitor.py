@@ -6,15 +6,40 @@ from datetime import datetime
 import logging
 import os
 import time
+import threading
+from flask import Flask
 
 # 환경변수에서 디스코드 웹훅 URL 가져오기
 DISCORD_WEBHOOK_URL = os.getenv('DISCORD_WEBHOOK_URL', '')
+
+# Flask 앱 생성 (Render가 포트를 감지할 수 있도록)
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return '''
+    <h1>🎫 나눔티켓 모니터링 봇</h1>
+    <p>현재 상태: 활성 중 ✅</p>
+    <p>마지막 체크: <span id="time"></span></p>
+    <script>
+        document.getElementById('time').textContent = new Date().toLocaleString();
+        setTimeout(() => location.reload(), 60000); // 1분마다 새로고침
+    </script>
+    '''
+
+@app.route('/status')
+def status():
+    return {
+        "status": "running",
+        "service": "나눔티켓 모니터링",
+        "last_check": datetime.now().isoformat()
+    }
 
 class TicketMonitor:
     def __init__(self):
         self.url = "https://www.nanumticket.or.kr/pe/list.html?p_new=1"
         self.previous_hashes = set()
-        self.data_file = "/tmp/ticket_data.json"  # Render의 임시 디스크 사용
+        self.data_file = "/tmp/ticket_data.json"
         
         logging.basicConfig(
             level=logging.INFO,
@@ -22,7 +47,7 @@ class TicketMonitor:
         )
         self.logger = logging.getLogger(__name__)
         
-        self.logger.info("🎨 나눔티켓 모니터링 시작 (Render)")
+        self.logger.info("🎨 나눔티켓 모니터링 시작 (Render Web Service)")
         self.load_previous_data()
     
     def load_previous_data(self):
@@ -133,6 +158,122 @@ class TicketMonitor:
                     # 날짜 추출
                     date_text = ""
                     clock_icon = li.find('i', class_='fa-solid fa-clock')
+                    if clock_icon:
+                        date_p = clock_icon.find_parent('p')
+                        if date_p:
+                            date_text = date_p.get_text(strip=True)
+                    
+                    # 장소 추출
+                    location_text = ""
+                    location_icon = li.find('i', class_='fa-solid fa-location-dot')
+                    if location_icon:
+                        location_p = location_icon.find_parent('p')
+                        if location_p:
+                            location_text = location_p.get_text(strip=True)
+                    
+                    # 태그 추출
+                    tags = []
+                    for span in li.find_all('span', class_=['blue', 'gray', 'orange']):
+                        tag_text = span.get_text(strip=True)
+                        if tag_text:
+                            tags.append(tag_text)
+                    
+                    if title and len(title) > 5:
+                        tickets.append({
+                            'title': title,
+                            'link': full_link,
+                            'date': date_text,
+                            'location': location_text,
+                            'tags': ', '.join(tags),
+                            'hash': hashlib.md5(f"{title}{full_link}".encode()).hexdigest()
+                        })
+                
+                except Exception as e:
+                    continue
+            
+            return tickets
+            
+        except Exception as e:
+            self.logger.error(f"파싱 실패: {e}")
+            return []
+    
+    def check_tickets(self):
+        """티켓을 체크하고 새로운 것이 있으면 알림"""
+        self.logger.info("🔍 티켓 체크 중...")
+        
+        html_content = self.get_page_content()
+        if not html_content:
+            return
+        
+        tickets = self.parse_tickets(html_content)
+        if not tickets:
+            self.logger.warning("티켓을 찾을 수 없습니다")
+            return
+        
+        current_hashes = {ticket['hash'] for ticket in tickets}
+        
+        # 첫 실행시에는 알림 안 보내고 데이터만 저장
+        if not self.previous_hashes:
+            self.logger.info(f"📋 초기 로드: {len(tickets)}개 티켓 저장 (알림 X)")
+            self.previous_hashes = current_hashes
+            self.save_current_data(current_hashes)
+            return
+        
+        # 새로운 티켓 찾기
+        new_hashes = current_hashes - self.previous_hashes
+        
+        if new_hashes:
+            self.logger.info(f"🎉 새로운 티켓 {len(new_hashes)}개 발견!")
+            
+            new_tickets_sent = 0
+            for ticket in tickets:
+                if ticket['hash'] in new_hashes:
+                    self.logger.info(f"🎫 새 티켓: {ticket['title']}")
+                    if self.send_discord_notification(ticket):
+                        new_tickets_sent += 1
+                        time.sleep(1)  # 디스코드 API 제한 방지
+            
+            self.logger.info(f"📤 총 {new_tickets_sent}개 알림 전송 완료")
+        else:
+            self.logger.info("새로운 티켓 없음")
+        
+        # 현재 상태 저장
+        self.previous_hashes = current_hashes
+        self.save_current_data(current_hashes)
+    
+    def run_forever(self):
+        """무한 루프로 5분마다 체크"""
+        while True:
+            try:
+                self.check_tickets()
+                self.logger.info("😴 5분 대기 중...")
+                time.sleep(300)  # 5분 = 300초
+                
+            except KeyboardInterrupt:
+                self.logger.info("👋 프로그램 종료")
+                break
+            except Exception as e:
+                self.logger.error(f"❌ 예외 발생: {e}")
+                self.logger.info("⏰ 30초 후 재시도...")
+                time.sleep(30)
+
+def run_monitor():
+    """백그라운드에서 모니터링 실행"""
+    if not DISCORD_WEBHOOK_URL:
+        print("❌ DISCORD_WEBHOOK_URL 환경변수를 설정해주세요!")
+        return
+    
+    monitor = TicketMonitor()
+    monitor.run_forever()
+
+if __name__ == "__main__":
+    # 백그라운드 스레드로 모니터링 시작
+    monitor_thread = threading.Thread(target=run_monitor, daemon=True)
+    monitor_thread.start()
+    
+    # Flask 웹 서버 시작 (Render가 포트를 감지할 수 있도록)
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port) = li.find('i', class_='fa-solid fa-clock')
                     if clock_icon:
                         date_p = clock_icon.find_parent('p')
                         if date_p:
