@@ -1,9 +1,3 @@
-# requirements.txt
-requests==2.31.0
-beautifulsoup4==4.12.2
-
-# ===== ticket_monitor.py (Render용) =====
-#!/usr/bin/env python3
 import requests
 from bs4 import BeautifulSoup
 import json
