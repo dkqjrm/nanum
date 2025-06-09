@@ -306,7 +306,27 @@ def run_monitor():
     monitor = TicketMonitor()
     monitor.run_forever()
 
+def keep_alive():
+    """자신의 서버에 주기적으로 요청을 보내서 깨어있게 함"""
+    import time
+    time.sleep(60)  # 1분 후 시작 (서버가 완전히 올라온 후)
+    
+    while True:
+        try:
+            port = os.environ.get('PORT', 10000)
+            # 자신에게 요청 보내기
+            requests.get(f"http://localhost:{port}/status", timeout=10)
+            print("🏃 Keep-alive ping sent")
+        except Exception as e:
+            print(f"Keep-alive 실패: {e}")
+        
+        time.sleep(600)  # 10분마다
+
 if __name__ == "__main__":
+    # Keep-alive 스레드 시작
+    keepalive_thread = threading.Thread(target=keep_alive, daemon=True)
+    keepalive_thread.start()
+    
     # 백그라운드 스레드로 모니터링 시작
     monitor_thread = threading.Thread(target=run_monitor, daemon=True)
     monitor_thread.start()
