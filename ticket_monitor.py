@@ -313,9 +313,8 @@ def keep_alive():
     
     while True:
         try:
-            port = os.environ.get('PORT', 10000)
             # 자신에게 요청 보내기
-            requests.get(f"http://localhost:{port}/status", timeout=10)
+            requests.get("https://nanum-m27z.onrender.com", timeout=10)
             print("🏃 Keep-alive ping sent")
         except Exception as e:
             print(f"Keep-alive 실패: {e}")
